@@ -17,6 +17,8 @@
 
 #include <errno.h>
 #include <stdio.h>
+#include <string.h>
+#include <assert.h>
 #include <limits.h>
 
 #include <stdlib.h>
@@ -29,6 +31,9 @@
 #include <linux/input.h>
 #ifndef EV_SYN /* 2.4 kernel headers */
 # define EV_SYN 0x00
+#endif
+#ifndef EV_ABS /* 2.4 kernel headers */
+#define EV_ABS 0x03
 #endif
 #ifndef EV_CNT
 # define EV_CNT (EV_MAX+1)
@@ -50,16 +55,53 @@
 #define GRAB_EVENTS_WANTED	1
 #define GRAB_EVENTS_ACTIVE	2
 
+/* includes available in 2.6.30-rc5 */
+#ifndef BTN_TOOL_QUADTAP
+#define BTN_TOOL_QUADTAP	0x14f	/* Four fingers on trackpad */
+#define ABS_MT_TOUCH_MAJOR	0x30	/* Major axis of touching ellipse */
+#define ABS_MT_TOUCH_MINOR	0x31	/* Minor axis (omit if circular) */
+#define ABS_MT_WIDTH_MAJOR	0x32	/* Major axis of approaching ellipse */
+#define ABS_MT_WIDTH_MINOR	0x33	/* Minor axis (omit if circular) */
+#define ABS_MT_ORIENTATION	0x34	/* Ellipse orientation */
+#define ABS_MT_POSITION_X	0x35	/* Center X ellipse position */
+#define ABS_MT_POSITION_Y	0x36	/* Center Y ellipse position */
+#define ABS_MT_TOOL_TYPE	0x37	/* Type of touching device */
+#define ABS_MT_BLOB_ID		0x38	/* Group a set of packets as a blob */
+#define ABS_MT_TRACKING_ID	0x39	/* Unique ID of initiated contact */
+#define SYN_MT_REPORT		2
+#define MT_TOOL_FINGER		0
+#define MT_TOOL_PEN		1
+#endif
+
+/* includes available in 2.6.33 */
+#ifndef ABS_MT_PRESSURE
+#define ABS_MT_PRESSURE		0x3a	/* Pressure on contact area */
+#endif
+
+/* includes available in 2.6.36 */
+#ifndef ABS_MT_SLOT
+#define ABS_MT_SLOT		0x2f	/* MT slot being modified */
+#endif
+
+/* includes available in 2.6.38 */
+#ifndef ABS_MT_DISTANCE
+#define ABS_MT_DISTANCE		0x3b	/* Contact hover distance */
+#endif
+
+#define SLOT_MAX (10)
+
 struct tslib_input {
 	struct tslib_module_info module;
 
-	int	current_x;
-	int	current_y;
-	int	current_p;
+	int	current_x[SLOT_MAX];
+	int	current_y[SLOT_MAX];
+	int	current_p[SLOT_MAX];
 
 	int	sane_fd;
 	int	using_syn;
 	int	grab_events;
+
+	int	current_slot;
 };
 
 #define DIV_ROUND_UP(n,d) (((n) + (d) - 1) / (d))
@@ -108,7 +150,7 @@ static int check_fd(struct tslib_input *i)
 	when not touched, the pressure is forced to 0. */
 
 	if (!(absbit[BIT_WORD(ABS_PRESSURE)] & BIT_MASK(ABS_PRESSURE))) {
-		i->current_p = 255;
+		memset(i->current_p, 255, sizeof(int) * SLOT_MAX);
 
 		if ((ioctl(ts->fd, EVIOCGBIT(EV_KEY, sizeof(keybit)), keybit) < 0) ||
 			!(keybit[BIT_WORD(BTN_TOUCH)] & BIT_MASK(BTN_TOUCH) ||
@@ -167,6 +209,7 @@ static int ts_input_read(struct tslib_module_info *inf,
 				}
 				break;
 			case EV_SYN:
+			case SYN_MT_REPORT:
 				if (ev.code == SYN_REPORT) {
 					/* Fill out a new complete event */
 					if (pen_up) {
@@ -175,9 +218,9 @@ static int ts_input_read(struct tslib_module_info *inf,
 						samp->pressure = 0;
 						pen_up = 0;
 					} else {
-						samp->x = i->current_x;
-						samp->y = i->current_y;
-						samp->pressure = i->current_p;
+						samp->x = i->current_x[i->current_slot];
+						samp->y = i->current_y[i->current_slot];
+						samp->pressure = i->current_p[i->current_slot];
 				}
 				samp->tv = ev.time;
 	#ifdef DEBUG
@@ -192,19 +235,25 @@ static int ts_input_read(struct tslib_module_info *inf,
 			case EV_ABS:
 				switch (ev.code) {
 				case ABS_X:
-					i->current_x = ev.value;
+					i->current_x[i->current_slot] = ev.value;
 					break;
 				case ABS_Y:
-					i->current_y = ev.value;
+					i->current_y[i->current_slot] = ev.value;
+					break;
+				case ABS_MT_SLOT:
+					i->current_slot = ev.value;
+					break;
+				case ABS_MT_TOUCH_MAJOR:
+					i->current_p[i->current_slot] = ev.value;
 					break;
 				case ABS_MT_POSITION_X:
-					i->current_x = ev.value;
+					i->current_x[i->current_slot] = ev.value;
 					break;
 				case ABS_MT_POSITION_Y:
-					i->current_y = ev.value;
+					i->current_y[i->current_slot] = ev.value;
 					break;
 				case ABS_PRESSURE:
-					i->current_p = ev.value;
+					i->current_p[i->current_slot] = ev.value;
 					break;
 				}
 				break;
@@ -238,9 +287,9 @@ static int ts_input_read(struct tslib_module_info *inf,
 				switch (ev.code) {
 				case ABS_X:
 					if (ev.value != 0) {
-						samp->x = i->current_x = ev.value;
-						samp->y = i->current_y;
-						samp->pressure = i->current_p;
+						samp->x = i->current_x[i->current_slot] = ev.value;
+						samp->y = i->current_y[i->current_slot];
+						samp->pressure = i->current_p[i->current_slot];
 					} else {
 						fprintf(stderr, "tslib: dropped x = 0\n");
 						continue;
@@ -248,18 +297,30 @@ static int ts_input_read(struct tslib_module_info *inf,
 					break;
 				case ABS_Y:
 					if (ev.value != 0) {
-						samp->x = i->current_x;
-						samp->y = i->current_y = ev.value;
-						samp->pressure = i->current_p;
+						samp->x = i->current_x[i->current_slot];
+						samp->y = i->current_y[i->current_slot] = ev.value;
+						samp->pressure = i->current_p[i->current_slot];
 					} else {
 						fprintf(stderr, "tslib: dropped y = 0\n");
 						continue;
 					}
 					break;
 				case ABS_PRESSURE:
-					samp->x = i->current_x;
-					samp->y = i->current_y;
-					samp->pressure = i->current_p = ev.value;
+					samp->x = i->current_x[i->current_slot];
+					samp->y = i->current_y[i->current_slot];
+					samp->pressure = i->current_p[i->current_slot] = ev.value;
+					break;
+				case ABS_MT_SLOT:
+					i->current_slot = ev.value;
+					break;
+				case ABS_MT_TOUCH_MAJOR:
+					i->current_p[i->current_slot] = ev.value;
+					break;
+				case ABS_MT_POSITION_X:
+					i->current_x[i->current_slot] = ev.value;
+					break;
+				case ABS_MT_POSITION_Y:
+					i->current_y[i->current_slot] = ev.value;
 					break;
 				}
 				samp->tv = ev.time;
@@ -354,12 +415,13 @@ TSAPI struct tslib_module_info *input_mod_init(struct tsdev *dev, const char *pa
 		return NULL;
 
 	i->module.ops = &__ts_input_ops;
-	i->current_x = 0;
-	i->current_y = 0;
-	i->current_p = 0;
+	memset(i->current_x, 0, sizeof(int) * SLOT_MAX);
+	memset(i->current_y, 0, sizeof(int) * SLOT_MAX);
+	memset(i->current_p, 0, sizeof(int) * SLOT_MAX);
 	i->sane_fd = 0;
 	i->using_syn = 0;
 	i->grab_events = 0;
+	i->current_slot = 0;
 
 	if (tslib_parse_vars(&i->module, raw_vars, NR_VARS, params)) {
 		free(i);
