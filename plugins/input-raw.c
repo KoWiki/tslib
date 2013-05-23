@@ -125,11 +125,6 @@ static int check_fd(struct tslib_input *i)
 		return -1;
 	}
 
-	if (version < EV_VERSION) {
-		fprintf(stderr, "tslib: Selected device uses a different version of the event protocol than tslib was compiled for\n");
-		return -1;
-	}
-
 	if ( (ioctl(ts->fd, EVIOCGBIT(0, sizeof(evbit)), evbit) < 0) ||
 		!(evbit[BIT_WORD(EV_ABS)] & BIT_MASK(EV_ABS)) ||
 		!(evbit[BIT_WORD(EV_KEY)] & BIT_MASK(EV_KEY)) ) {
@@ -209,8 +204,7 @@ static int ts_input_read(struct tslib_module_info *inf,
 				}
 				break;
 			case EV_SYN:
-			case SYN_MT_REPORT:
-				if (ev.code == SYN_REPORT) {
+				if (ev.code == SYN_REPORT || ev.code == SYN_MT_REPORT) {
 					/* Fill out a new complete event */
 					if (pen_up) {
 						samp->x = 0;
@@ -221,15 +215,16 @@ static int ts_input_read(struct tslib_module_info *inf,
 						samp->x = i->current_x[i->current_slot];
 						samp->y = i->current_y[i->current_slot];
 						samp->pressure = i->current_p[i->current_slot];
-				}
-				samp->tv = ev.time;
+						samp->slot = i->current_slot;
+					}
+					samp->tv = ev.time;
 	#ifdef DEBUG
-				fprintf(stderr, "RAW---------------------> %d %d %d %d.%d\n",
-						samp->x, samp->y, samp->pressure, samp->tv.tv_sec,
+					fprintf(stderr, "RAW---------------------> %d %d %d %d %d.%d\n",
+						samp->slot, samp->x, samp->y, samp->pressure, samp->tv.tv_sec,
 						samp->tv.tv_usec);
 	#endif /* DEBUG */
-				samp++;
-				total++;
+					samp++;
+					total++;
 				}
 				break;
 			case EV_ABS:
@@ -240,7 +235,7 @@ static int ts_input_read(struct tslib_module_info *inf,
 				case ABS_Y:
 					i->current_y[i->current_slot] = ev.value;
 					break;
-				case ABS_MT_SLOT:
+				case ABS_MT_TRACKING_ID:
 					i->current_slot = ev.value;
 					break;
 				case ABS_MT_TOUCH_MAJOR:
@@ -290,6 +285,7 @@ static int ts_input_read(struct tslib_module_info *inf,
 						samp->x = i->current_x[i->current_slot] = ev.value;
 						samp->y = i->current_y[i->current_slot];
 						samp->pressure = i->current_p[i->current_slot];
+						samp->slot = i->current_slot;
 					} else {
 						fprintf(stderr, "tslib: dropped x = 0\n");
 						continue;
@@ -300,6 +296,7 @@ static int ts_input_read(struct tslib_module_info *inf,
 						samp->x = i->current_x[i->current_slot];
 						samp->y = i->current_y[i->current_slot] = ev.value;
 						samp->pressure = i->current_p[i->current_slot];
+						samp->slot = i->current_slot;
 					} else {
 						fprintf(stderr, "tslib: dropped y = 0\n");
 						continue;
@@ -309,8 +306,9 @@ static int ts_input_read(struct tslib_module_info *inf,
 					samp->x = i->current_x[i->current_slot];
 					samp->y = i->current_y[i->current_slot];
 					samp->pressure = i->current_p[i->current_slot] = ev.value;
+					samp->slot = i->current_slot;
 					break;
-				case ABS_MT_SLOT:
+				case ABS_MT_TRACKING_ID:
 					i->current_slot = ev.value;
 					break;
 				case ABS_MT_TOUCH_MAJOR:
@@ -325,8 +323,8 @@ static int ts_input_read(struct tslib_module_info *inf,
 				}
 				samp->tv = ev.time;
 	#ifdef DEBUG
-				fprintf(stderr, "RAW---------------------------> %d %d %d\n",
-					samp->x, samp->y, samp->pressure);
+				fprintf(stderr, "RAW---------------------------> %d %d %d %d\n",
+					samp->slot, samp->x, samp->y, samp->pressure);
 	#endif /* DEBUG */
 				samp++;
 				total++;
